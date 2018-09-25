@@ -1,10 +1,12 @@
 package org.http4k.filter
 
+import arrow.effects.IO
 import org.http4k.core.Filter
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status.Companion.BAD_REQUEST
 import org.http4k.core.Uri
+import org.http4k.core.arrow.then
 
 object RequestFilters {
 
@@ -12,10 +14,9 @@ object RequestFilters {
      * Intercept the request before it is sent to the next service.
      */
     object Tap {
-        operator fun invoke(fn: (Request) -> Unit) = Filter { next ->
-            {
-                fn(it)
-                next(it)
+        operator fun invoke(fn: (Request) -> IO<Unit>) = Filter { next ->
+            { request ->
+                fn(request).then { next(request) }
             }
         }
     }
@@ -64,8 +65,9 @@ object RequestFilters {
     object ProxyHost {
         operator fun invoke(mode: ProxyProtocolMode = ProxyProtocolMode.Http): Filter = Filter { next ->
             {
-                it.header("Host")?.let { host -> next(it.uri(mode(it.uri).authority(host))) }
-                        ?: Response(BAD_REQUEST.description("Cannot proxy without host header"))
+                it.header("Host")
+                        ?.let { host -> next(it.uri(mode(it.uri).authority(host))) }
+                        ?: IO.just(Response(BAD_REQUEST.description("Cannot proxy without host header")))
             }
         }
     }

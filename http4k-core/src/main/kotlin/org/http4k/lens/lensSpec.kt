@@ -1,5 +1,8 @@
 package org.http4k.lens
 
+import arrow.core.Either
+import arrow.optics.PLens
+import arrow.optics.POptional
 import org.http4k.core.Uri
 import org.http4k.lens.ParamMeta.BooleanParam
 import org.http4k.lens.ParamMeta.IntegerParam
@@ -14,6 +17,28 @@ import java.time.format.DateTimeFormatter.ISO_LOCAL_DATE
 import java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
 import java.time.format.DateTimeFormatter.ISO_ZONED_DATE_TIME
 import java.util.UUID
+
+interface Lens<in IN, out OUT> : (IN) -> OUT {
+    val meta: Meta
+
+    companion object {
+        operator fun <IN, OUT> invoke(meta: Meta, get: (IN) -> OUT): Lens<IN, OUT> =
+                object : Lens<IN, OUT>, (IN) -> OUT by get {
+                    override val meta = meta
+                }
+    }
+}
+
+interface BiDiLens<IN, OUT> : PLens<IN, Either<LensFailure, IN>, Either<LensFailure, OUT>, OUT> {
+    val meta: Meta
+
+    companion object {
+        operator fun <IN, OUT> invoke(meta: Meta, lens: PLens<IN, Either<LensFailure, IN>, Either<LensFailure, OUT>, OUT>): BiDiLens<IN, OUT> =
+                object : BiDiLens<IN, OUT>, PLens<IN, Either<LensFailure, IN>, Either<LensFailure, OUT>, OUT> by lens {
+                    override val meta = meta
+                }
+    }
+}
 
 class LensGet<in IN, out OUT> private constructor(private val getFn: (String, IN) -> List<OUT>) {
     operator fun invoke(name: String) = { target: IN -> getFn(name, target) }

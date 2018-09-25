@@ -1,9 +1,12 @@
 package org.http4k.filter
 
-import org.http4k.core.Filter
-import org.http4k.core.HttpMessage
-import org.http4k.core.MemoryBody
-import org.http4k.core.then
+import arrow.core.constant
+import arrow.effects.IO
+import arrow.effects.IO.Companion.raiseError
+import arrow.effects.handleErrorWith
+import org.http4k.core.*
+import org.http4k.core.arrow.catch
+import org.http4k.core.arrow.then
 import java.io.PrintStream
 
 object DebuggingFilters {
@@ -14,7 +17,7 @@ object DebuggingFilters {
      */
     object PrintRequest {
         operator fun invoke(out: PrintStream = System.out, debugStream: Boolean = defaultDebugStream): Filter = RequestFilters.Tap { req ->
-            out.println(listOf("***** REQUEST: ${req.method}: ${req.uri} *****", req.printable(debugStream)).joinToString("\n"))
+            IO { out.println(listOf("***** REQUEST: ${req.method}: ${req.uri} *****", req.printable(debugStream)).joinToString("\n")) }
         }
     }
 
@@ -24,16 +27,17 @@ object DebuggingFilters {
     object PrintResponse {
         operator fun invoke(out: PrintStream = System.out, debugStream: Boolean = defaultDebugStream): Filter = Filter { next ->
             {
-                try {
-                    next(it).let { response ->
-                        out.println(listOf("***** RESPONSE ${response.status.code} to ${it.method}: ${it.uri} *****", response.printable(debugStream)).joinToString("\n"))
-                        response
-                    }
-                } catch (e: Exception) {
-                    out.println("***** RESPONSE FAILED to ${it.method}: ${it.uri}  *****")
-                    e.printStackTrace(out)
-                    throw e
-                }
+                next(it).then { response ->
+                            IO {
+                                out.println(listOf("***** RESPONSE ${response.status.code} to ${it.method}: ${it.uri} *****", response.printable(debugStream)).joinToString("\n"))
+                            }.map(constant(response))
+                        }
+                        .catch { e ->
+                            IO {
+                                out.println("***** RESPONSE FAILED to ${it.method}: ${it.uri}  *****")
+                                e.printStackTrace(out)
+                            }.then { raiseError<Response>(e) }
+                        }
             }
         }
     }

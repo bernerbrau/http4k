@@ -1,6 +1,8 @@
 package org.http4k.lens
 
-class LensFailure(val failures: List<Failure>, override val cause: Exception? = null, val target: Any? = null) : Exception(failures.joinToString { it.toString() }, cause) {
+import arrow.effects.IO
+
+data class LensFailure(val failures: List<Failure>, val cause: Exception? = null, val target: Any? = null) {
 
     constructor(vararg failures: Failure, cause: Exception? = null, target: Any? = null) : this(failures.asList(), cause, target)
 
@@ -11,7 +13,12 @@ class LensFailure(val failures: List<Failure>, override val cause: Exception? = 
             else -> Failure.Type.Missing
         }
     }
+
+    fun <A> raiseError(): IO<A> = IO.raiseError(LensFailureException(this))
+
 }
+
+class LensFailureException(failure: LensFailure): Exception(failure.failures.joinToString { it.toString() }, failure.cause)
 
 sealed class Failure(val type: Type) {
     enum class Type {

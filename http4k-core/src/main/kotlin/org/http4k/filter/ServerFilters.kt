@@ -1,24 +1,22 @@
 package org.http4k.filter
 
+import arrow.core.*
+import arrow.effects.ForIO
+import arrow.effects.IO
+import arrow.effects.applicative
+import arrow.effects.fix
+import arrow.instances.traverse
+import arrow.optics.*
 import org.http4k.base64Decoded
-import org.http4k.core.ContentType
-import org.http4k.core.Credentials
-import org.http4k.core.Filter
-import org.http4k.core.HttpHandler
-import org.http4k.core.Method
+import org.http4k.core.*
 import org.http4k.core.Method.OPTIONS
-import org.http4k.core.Request
-import org.http4k.core.RequestContext
-import org.http4k.core.Response
-import org.http4k.core.Status
 import org.http4k.core.Status.Companion.BAD_REQUEST
 import org.http4k.core.Status.Companion.INTERNAL_SERVER_ERROR
 import org.http4k.core.Status.Companion.OK
 import org.http4k.core.Status.Companion.UNAUTHORIZED
 import org.http4k.core.Status.Companion.UNSUPPORTED_MEDIA_TYPE
-import org.http4k.core.Store
-import org.http4k.core.then
-import org.http4k.core.with
+import org.http4k.core.arrow.catch
+import org.http4k.core.arrow.then
 import org.http4k.lens.Failure
 import org.http4k.lens.Header
 import org.http4k.lens.LensFailure
@@ -46,13 +44,15 @@ object ServerFilters {
         private fun List<String>.joined() = this.joinToString(", ")
 
         operator fun invoke(policy: CorsPolicy) = Filter { next ->
-            {
-                val response = if (it.method == OPTIONS) Response(OK) else next(it)
-                response.with(
-                        Header.required("access-control-allow-origin") of policy.origins.joined(),
-                        Header.required("access-control-allow-headers") of policy.headers.joined(),
-                        Header.required("access-control-allow-methods") of policy.methods.map { it.name }.joined()
-                )
+            { request ->
+                val responseIO = if (request.method == OPTIONS) IO.just(Response(OK)) else next(request)
+                responseIO.map { response ->
+                    response.with(
+                            Header.required("access-control-allow-origin") of policy.origins.joined(),
+                            Header.required("access-control-allow-headers") of policy.headers.joined(),
+                            Header.required("access-control-allow-methods") of policy.methods.map { it.name }.joined()
+                    )
+                }
             }
         }
     }
@@ -92,7 +92,7 @@ object ServerFilters {
             {
                 val credentials = it.basicAuthenticationCredentials()
                 if (credentials == null || !authorize(credentials)) {
-                    Response(UNAUTHORIZED).header("WWW-Authenticate", "Basic Realm=\"$realm\"")
+                    IO.just(Response(UNAUTHORIZED).header("WWW-Authenticate", "Basic Realm=\"$realm\""))
                 } else next(it)
             }
         }
@@ -115,7 +115,7 @@ object ServerFilters {
                 it.basicAuthenticationCredentials()
                         ?.let(lookup)
                         ?.let { found -> next(it.with(key of found)) }
-                        ?: Response(UNAUTHORIZED).header("WWW-Authenticate", "Basic Realm=\"$realm\"")
+                        ?: IO.just(Response(UNAUTHORIZED).header("WWW-Authenticate", "Basic Realm=\"$realm\""))
             }
         }
 
@@ -138,7 +138,7 @@ object ServerFilters {
          */
         operator fun invoke(checkToken: (String) -> Boolean) = Filter { next ->
             {
-                if (it.bearerToken()?.let(checkToken) == true) next(it) else Response(UNAUTHORIZED)
+                if (it.bearerToken()?.let(checkToken) == true) next(it) else IO.just(Response(UNAUTHORIZED))
             }
         }
 
@@ -150,7 +150,7 @@ object ServerFilters {
                 it.bearerToken()
                         ?.let(lookup)
                         ?.let { found -> next(it.with(key of found)) }
-                        ?: Response(UNAUTHORIZED)
+                        ?: IO.just(Response(UNAUTHORIZED))
             }
         }
 
@@ -159,31 +159,53 @@ object ServerFilters {
 
     /**
      * Converts Lens extraction failures into correct HTTP responses (Bad Requests/UnsupportedMediaType).
-     * This is required when using lenses to automatically unmarshall inbound requests.
+     * This is required when using lenses to automatically unmarshal inbound requests.
      * Note that LensFailures from unmarshalling upstream Response objects are NOT caught to avoid incorrect server behaviour.
      */
-    object CatchLensFailure : Filter by CatchLensFailure()
+    object CatchLensFailure : ErrorHandler<LensFailure> by CatchLensFailure()
 
     /**
      * Converts Lens extraction failures into correct HTTP responses (Bad Requests/UnsupportedMediaType).
-     * This is required when using lenses to automatically unmarshall inbound requests.
+     * This is required when using lenses to automatically unmarshal inbound requests.
      * Note that LensFailures from unmarshalling upstream Response objects are NOT caught to avoid incorrect server behaviour.
      *
      * Pass the failResponseFn param to provide a custom response for the LensFailure case
      */
-    fun CatchLensFailure(failResponseFn: (LensFailure) -> Response = {
-        Response(BAD_REQUEST.description(it.failures.joinToString("; ")))
-    }) = object : Filter {
-        override fun invoke(next: HttpHandler): HttpHandler = {
-            try {
-                next(it)
-            } catch (lensFailure: LensFailure) {
-                when {
-                    lensFailure.target is Response -> throw lensFailure
-                    lensFailure.target is RequestContext -> throw lensFailure
-                    lensFailure.overall() == Failure.Type.Unsupported -> Response(UNSUPPORTED_MEDIA_TYPE)
-                    else -> failResponseFn(lensFailure)
-                }
+    fun CatchLensFailure(failResponseFn: (LensFailure) -> IO<Response> = {
+        IO.just(Response(BAD_REQUEST.description(it.failures.joinToString("; "))))
+    }) = object : ErrorHandler<LensFailure> {
+        override fun invoke(next: PartialHttpHandler<LensFailure>): HttpHandler = {
+            next(it).then { result ->
+                result.fold({ lensFailure: LensFailure ->
+                    when {
+                        lensFailure.target is Response -> lensFailure.raiseError()
+                        lensFailure.target is RequestContext -> lensFailure.raiseError()
+                        lensFailure.overall() == Failure.Type.Unsupported -> IO.just(Response(UNSUPPORTED_MEDIA_TYPE))
+                        else -> failResponseFn(lensFailure)
+                    }
+                }, IO.Companion::just)
+            }
+        }
+    }
+
+    fun <ERR1, ERR2> CatchLensFailure(extract: (ERR1) -> Either<ERR2, LensFailure>, failResponseFn: (LensFailure) -> IO<Response> = {
+        IO.just(Response(BAD_REQUEST.description(it.failures.joinToString("; "))))
+    }) = object : PartialErrorHandler<ERR1, ERR2> {
+        override fun invoke(next: PartialHttpHandler<ERR1>): PartialHttpHandler<ERR2> = { request ->
+            next(request).then { result ->
+                result.swap()
+                        .traverse(Either.applicative(), extract).fix()
+                        .traverse(IO.applicative()) {
+                            it.traverse(IO.applicative()) { lensFailure: LensFailure ->
+                                when {
+                                    lensFailure.target is Response -> lensFailure.raiseError()
+                                    lensFailure.target is RequestContext -> lensFailure.raiseError()
+                                    lensFailure.overall() == Failure.Type.Unsupported -> IO.just(Response(UNSUPPORTED_MEDIA_TYPE))
+                                    else -> failResponseFn(lensFailure)
+                                }
+                            }.fix()
+                            .map(Lens.codiagonal<Response>()::get)
+                        }.fix()
             }
         }
     }
@@ -194,12 +216,12 @@ object ServerFilters {
     object CatchAll {
         operator fun invoke(errorStatus: Status = INTERNAL_SERVER_ERROR): Filter = Filter { next ->
             {
-                try {
-                    next(it)
-                } catch (e: Exception) {
-                    val sw = StringWriter()
-                    e.printStackTrace(PrintWriter(sw))
-                    Response(errorStatus).body(sw.toString())
+                next(it).catch { e ->
+                    val body = StringWriter().also { sw ->
+                        e.printStackTrace(PrintWriter(sw))
+                    }.toString()
+
+                    IO.just(Response(errorStatus).body(body))
                 }
             }
         }
@@ -211,8 +233,10 @@ object ServerFilters {
     object CopyHeaders {
         operator fun invoke(vararg headers: String): Filter = Filter { next ->
             { request ->
-                headers.fold(next(request)) { memo, name ->
-                    request.header(name)?.let { memo.header(name, it) } ?: memo
+                next(request).map { response ->
+                    headers.fold(response) { memo, name ->
+                        request.header(name)?.let { memo.header(name, it) } ?: memo
+                    }
                 }
             }
         }
@@ -249,7 +273,7 @@ object ServerFilters {
     object SetContentType {
         operator fun invoke(contentType: ContentType): Filter = Filter { next ->
             {
-                next(it).with(Header.Common.CONTENT_TYPE of contentType)
+                next(it).map { response -> response.with(Header.Common.CONTENT_TYPE of contentType) }
             }
         }
     }
@@ -263,12 +287,14 @@ object ServerFilters {
         operator fun invoke(loader: ResourceLoader = Classpath(),
                             toResourceName: (Response) -> String? = { if (it.status.successful) null else it.status.code.toString() }
         ): Filter = Filter { next ->
-            {
-                val response = next(it)
-                toResourceName(response)
-                        ?.let {
-                            response.body(loader.load(it)?.readText() ?: "")
-                        } ?: response
+            handleHttp { handle ->
+                handle { request ->
+                    val response = next(request).bind()
+                    toResourceName(response)
+                            ?.let {
+                                response.body(loader.load(it).bind()?.readText() ?: "")
+                            } ?: response
+                }
             }
         }
     }

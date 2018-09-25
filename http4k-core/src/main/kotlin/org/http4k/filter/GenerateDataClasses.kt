@@ -1,7 +1,10 @@
 package org.http4k.filter
 
+import arrow.core.constant
+import arrow.effects.IO
 import org.http4k.core.Filter
 import org.http4k.core.HttpHandler
+import org.http4k.core.arrow.then
 import org.http4k.format.Json
 import org.http4k.format.JsonType
 import org.http4k.format.JsonType.Array
@@ -23,15 +26,17 @@ class GenerateDataClasses<ROOT : NODE, out NODE>(private val json: Json<ROOT, NO
 
     override fun invoke(next: HttpHandler): HttpHandler =
         { req ->
-            val response = next(req)
-            out.println("// result generated from ${req.uri}\n")
-            out.println(flatten(setOf(process("Base", json.body().toLens()(response))))
-                .toSet()
-                .groupBy { it.asClassName() }
-                .mapNotNull { (_, gens) -> gens.mapNotNull(Gen::asDefinitionString).sortedByDescending { it.length }.firstOrNull() }
-                .sorted()
-                .joinToString("\n\n"))
-            response
+            next(req).then { response ->
+                IO {
+                    out.println("// result generated from ${req.uri}\n")
+                    out.println(flatten(setOf(process("Base", json.body().toLens()(response))))
+                            .toSet()
+                            .groupBy { it.asClassName() }
+                            .mapNotNull { (_, gens) -> gens.mapNotNull(Gen::asDefinitionString).sortedByDescending { it.length }.firstOrNull() }
+                            .sorted()
+                            .joinToString("\n\n"))
+                }.map(constant(response))
+            }
         }
 
     interface Gen : Iterable<Gen> {

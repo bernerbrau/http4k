@@ -152,6 +152,12 @@ allprojects {
             xml.enabled true
         }
     }
+
+    kotlin {
+        experimental {
+            coroutines "enable"
+        }
+    }
 }
 
 coveralls {
